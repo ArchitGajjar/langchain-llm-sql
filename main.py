@@ -8,7 +8,11 @@ from langchain_community.utilities import SQLDatabase
 from langchain.chains import create_sql_query_chain
 from langchain_openai import ChatOpenAI
 
-
+from operator import itemgetter
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_community.tools.sql_database.tool import QuerySQLDataBaseTool
 
 app = FastAPI()
 
@@ -29,7 +33,15 @@ app.add_middleware(
 db = SQLDatabase.from_uri("sqlite:///chinook-database/ChinookDatabase/DataSources/Chinook.db")
 print(db.dialect)
 print(db.get_usable_table_names())
-print(db.run("SELECT * FROM Artist LIMIT 10;"))
+# Testing purpose -> print(db.run("SELECT * FROM Artist LIMIT 10;"))
+
+answer_prompt = PromptTemplate.from_template(
+    """Given the following user question, corresponding SQL query, and SQL result, answer the user question.
+    Question: {question}
+    SQL Query: {query}
+    SQL Result: {result}
+    Answer: """
+)
 
 # Define a Pydantic model for request and response validation
 class Item(BaseModel):
@@ -51,16 +63,30 @@ def read_item(item_id: int, q: Optional[str] = None):
 def create_item(item: Item):
     print("request received : ", item);
     llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0, max_tokens=100)
-    chain = create_sql_query_chain(llm, db)
+
+    reference_chain = create_sql_query_chain(llm, db) 
+
+    answer = answer_prompt | llm | StrOutputParser()
+    execute_query = QuerySQLDataBaseTool(db=db)
+    write_query = create_sql_query_chain(llm, db)
+    print("write_query : ", write_query);
+    chain = (
+        RunnablePassthrough.assign(query=write_query).assign(
+            result=itemgetter("query") | execute_query
+        )
+        | answer
+    )
 
     # what is the total for all invoices for customers who listen to Aerosmith ?
     response = chain.invoke({"question": item.text})
+    reference = reference_chain.invoke({"question": item.text})
+
     print("Query response : ", response);
-    dbResponse = db.run(response)
     return {
         "text": item.text,
         "sender": item.sender,
-        "response": dbResponse
+        "response": response,
+        "reference": reference
     }
 
 # Endpoint to update an existing item
